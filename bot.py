@@ -1,19 +1,666 @@
-import os
-import time
-import threading
 import requests
+import time
+import json
+import os
+import random
+import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# توکن باتت را اینجا وارد کن
 TOKEN = "1641879499:_lP6SnzTPGs45k1mDKFkqkrEwG6BhASRrxk"
+ADMIN_ID = 1874037237
 
-BASE_URL = f"https://tapi.bale.ai/bot{TOKEN}"
+URL = f"https://tapi.bale.ai/bot{TOKEN}/"
+DATA_FILE = "bot_data.json"
 
+offset = 0
 waiting_user = None
-partners = {}
+active_chats = {}
+
+users = {}
+reports = []
+blocked_users = set()
+
+MAIN_MENU = [
+    [{"text": "🎭 شروع چت ناشناس"}],
+    [{"text": "👥 پیدا کردن نفر"}, {"text": "💬 چت فعلی"}],
+    [{"text": "👤 پروفایل من"}, {"text": "🎲 سرگرمی"}],
+    [{"text": "🛑 پایان چت"}, {"text": "🚨 گزارش"}],
+    [{"text": "⚙️ تنظیمات"}, {"text": "❓ راهنما"}]
+]
+
+FUN_MENU = [
+    [{"text": "🎯 حدس عدد"}],
+    [{"text": "🧠 سؤال هوش"}],
+    [{"text": "🎲 شانس من"}],
+    [{"text": "🔙 برگشت"}]
+]
+
+ADMIN_MENU = [
+    [{"text": "👥 تعداد کاربران"}, {"text": "🟢 چت‌های فعال"}],
+    [{"text": "⏳ افراد منتظر"}, {"text": "🚨 گزارش‌ها"}],
+    [{"text": "📢 پیام همگانی"}],
+    [{"text": "🔙 خروج از پنل"}]
+]
+
+BUTTONS = {
+    "🎭 شروع چت ناشناس",
+    "👥 پیدا کردن نفر",
+    "💬 چت فعلی",
+    "👤 پروفایل من",
+    "🎲 سرگرمی",
+    "🛑 پایان چت",
+    "🚨 گزارش",
+    "⚙️ تنظیمات",
+    "❓ راهنما",
+    "🎯 حدس عدد",
+    "🧠 سؤال هوش",
+    "🎲 شانس من",
+    "🔙 برگشت",
+    "👥 تعداد کاربران",
+    "🟢 چت‌های فعال",
+    "⏳ افراد منتظر",
+    "🚨 گزارش‌ها",
+    "📢 پیام همگانی",
+    "🔙 خروج از پنل"
+}
+
+
+def send(chat_id, text, keyboard=None):
+    try:
+        data = {
+            "chat_id": chat_id,
+            "text": text
+        }
+
+        if keyboard is not None:
+            data["reply_markup"] = {
+                "keyboard": keyboard,
+                "resize_keyboard": True
+            }
+
+        response = requests.post(
+            URL + "sendMessage",
+            json=data,
+            timeout=20
+        )
+
+        print("SEND:", chat_id, response.status_code)
+        return response.json()
+
+    except Exception as e:
+        print("SEND ERROR:", e)
+        return None
+
+
+def save_data():
+    try:
+        data = {
+            "users": users,
+            "reports": reports,
+            "blocked_users": list(blocked_users)
+        }
+
+        with open(DATA_FILE, "w", encoding="utf-8") as file:
+            json.dump(
+                data,
+                file,
+                ensure_ascii=False,
+                indent=2
+            )
+
+    except Exception as e:
+        print("SAVE ERROR:", e)
+
+
+def load_data():
+    global users
+    global reports
+    global blocked_users
+
+    if not os.path.exists(DATA_FILE):
+        return
+
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+
+        users = {
+            int(user_id): info
+            for user_id, info in data.get("users", {}).items()
+        }
+
+        reports = data.get("reports", [])
+
+        blocked_users = {
+            int(user_id)
+            for user_id in data.get("blocked_users", [])
+        }
+
+    except Exception as e:
+        print("LOAD ERROR:", e)
+
+
+def register_user(user_id):
+    if user_id not in users:
+        users[user_id] = {
+            "chats": 0,
+            "reports": 0
+        }
+
+        save_data()
+
+
+def find_chat(user_id):
+    global waiting_user
+
+    if user_id in active_chats:
+        send(
+            user_id,
+            "💬 شما در حال حاضر در یک چت هستید.",
+            MAIN_MENU
+        )
+        return
+
+    if waiting_user == user_id:
+        send(
+            user_id,
+            "⏳ شما از قبل در صف هستید.",
+            MAIN_MENU
+        )
+        return
+
+    if waiting_user is None:
+        waiting_user = user_id
+
+        send(
+            user_id,
+            "⏳ در حال پیدا کردن یک نفر...\n\n"
+            "🛑 برای لغو، «پایان چت» را بزن.",
+            MAIN_MENU
+        )
+        return
+
+    other = waiting_user
+    waiting_user = None
+
+    if other in blocked_users:
+        waiting_user = user_id
+
+        send(
+            user_id,
+            "⏳ در حال پیدا کردن یک نفر...",
+            MAIN_MENU
+        )
+        return
+
+    active_chats[user_id] = other
+    active_chats[other] = user_id
+
+    users[user_id]["chats"] += 1
+    users[other]["chats"] += 1
+
+    save_data()
+
+    send(
+        user_id,
+        "🎉 یک نفر پیدا شد!\n\n"
+        "💬 حالا می‌توانید چت کنید.",
+        MAIN_MENU
+    )
+
+    send(
+        other,
+        "🎉 یک نفر پیدا شد!\n\n"
+        "💬 حالا می‌توانید چت کنید.",
+        MAIN_MENU
+    )
+
+
+def end_chat(user_id):
+    global waiting_user
+
+    if waiting_user == user_id:
+        waiting_user = None
+
+        send(
+            user_id,
+            "🛑 جستجو متوقف شد.",
+            MAIN_MENU
+        )
+        return
+
+    if user_id not in active_chats:
+        send(
+            user_id,
+            "ℹ️ شما چت فعالی ندارید.",
+            MAIN_MENU
+        )
+        return
+
+    other = active_chats.get(user_id)
+
+    del active_chats[user_id]
+
+    if other in active_chats:
+        del active_chats[other]
+
+    send(
+        user_id,
+        "🛑 چت پایان یافت.",
+        MAIN_MENU
+    )
+
+    if other is not None:
+        send(
+            other,
+            "🛑 طرف مقابل چت را پایان داد.",
+            MAIN_MENU
+        )
+
+
+def report_user(user_id):
+    if user_id not in active_chats:
+        send(
+            user_id,
+            "❌ شما در چت نیستید.",
+            MAIN_MENU
+        )
+        return
+
+    other = active_chats[user_id]
+
+    reports.append({
+        "reporter": user_id,
+        "reported": other
+    })
+
+    users[user_id]["reports"] += 1
+
+    save_data()
+
+    send(
+        user_id,
+        "🚨 گزارش ثبت شد.",
+        MAIN_MENU
+    )
+
+
+def show_profile(user_id):
+    info = users[user_id]
+
+    if user_id in active_chats:
+        status = "🟢 در چت"
+    elif waiting_user == user_id:
+        status = "⏳ در انتظار"
+    else:
+        status = "⚪ آزاد"
+
+    send(
+        user_id,
+        "👤 پروفایل من\n\n"
+        f"🆔 شناسه: {user_id}\n"
+        f"💬 تعداد چت‌ها: {info['chats']}\n"
+        f"🚨 گزارش‌ها: {info['reports']}\n"
+        f"📌 وضعیت: {status}",
+        MAIN_MENU
+    )
+
+
+def current_chat(user_id):
+    if user_id in active_chats:
+        send(
+            user_id,
+            "💬 شما در حال چت هستید.\n\n"
+            "👤 طرف مقابل متصل است.",
+            MAIN_MENU
+        )
+
+    elif waiting_user == user_id:
+        send(
+            user_id,
+            "⏳ شما در صف جستجو هستید.",
+            MAIN_MENU
+        )
+
+    else:
+        send(
+            user_id,
+            "⚪ چت فعالی ندارید.",
+            MAIN_MENU
+        )
+
+
+def start_guess_game(user_id):
+    number = random.randint(1, 10)
+
+    users[user_id]["game_number"] = number
+
+    save_data()
+
+    send(
+        user_id,
+        "🎯 حدس عدد\n\n"
+        "من یک عدد بین ۱ تا ۱۰ انتخاب کردم.\n\n"
+        "🔢 حدست را بفرست."
+    )
+
+
+def intelligence_game(user_id):
+    questions = [
+        (
+            "🧠 سؤال:\n\n"
+            "کدام حیوان پستاندار است؟\n\n"
+            "1️⃣ مرغ\n"
+            "2️⃣ گربه\n"
+            "3️⃣ مار\n"
+            "4️⃣ ماهی",
+            "2"
+        ),
+        (
+            "🧠 سؤال:\n\n"
+            "کدام سیاره به خورشید نزدیک‌تر است؟\n\n"
+            "1️⃣ زمین\n"
+            "2️⃣ مریخ\n"
+            "3️⃣ عطارد\n"
+            "4️⃣ مشتری",
+            "3"
+        )
+    ]
+
+    question, answer = random.choice(questions)
+
+    users[user_id]["quiz_answer"] = answer
+
+    save_data()
+
+    send(user_id, question)
+
+
+def luck_game(user_id):
+    result = random.randint(1, 100)
+
+    if result >= 80:
+        text = "🍀 شانس امروزت خیلی خوبه!"
+    elif result >= 50:
+        text = "🙂 شانس امروزت متوسطه!"
+    else:
+        text = "😄 شاید امروز کمی صبر لازم باشه!"
+
+    send(
+        user_id,
+        f"🎲 عدد شانس تو: {result}\n\n{text}",
+        FUN_MENU
+    )
+
+
+def admin_panel(user_id):
+    if user_id != ADMIN_ID:
+        send(
+            user_id,
+            "❌ دسترسی ندارید.",
+            MAIN_MENU
+        )
+        return
+
+    send(
+        user_id,
+        "🛠 پنل مدیریت",
+        ADMIN_MENU
+    )
+
+
+def process_message(user_id, text):
+    register_user(user_id)
+
+    if user_id in blocked_users:
+        send(
+            user_id,
+            "🚫 دسترسی شما مسدود شده است."
+        )
+        return
+
+    if text == "/start":
+        send(
+            user_id,
+            "╔════════════════════╗\n"
+            "       🎭 چت‌زون 🤖\n"
+            "╚════════════════════╝\n\n"
+            "🔥 به چت ناشناس خوش آمدی!\n\n"
+            "👇 یکی از گزینه‌ها را انتخاب کن:",
+            MAIN_MENU
+        )
+        return
+
+    if text == "/admin":
+        admin_panel(user_id)
+        return
+
+    # سرگرمی
+    if text == "🎲 سرگرمی":
+        send(
+            user_id,
+            "🎮 بخش سرگرمی\n\n"
+            "یکی را انتخاب کن:",
+            FUN_MENU
+        )
+        return
+
+    if text == "🎯 حدس عدد":
+        start_guess_game(user_id)
+        return
+
+    if text == "🧠 سؤال هوش":
+        start_quiz(user_id)
+        return
+
+    if text == "🎲 شانس من":
+        luck_game(user_id)
+        return
+
+    if text == "🔙 برگشت":
+        send(
+            user_id,
+            "🏠 منوی اصلی",
+            MAIN_MENU
+        )
+        return
+
+    # پاسخ حدس عدد
+    # فقط وقتی متن عدد باشد اجرا می‌شود
+    if (
+        "game_number" in users[user_id]
+        and text not in BUTTONS
+    ):
+        try:
+            guess = int(text)
+
+            if not 1 <= guess <= 10:
+                send(
+                    user_id,
+                    "🔢 عدد باید بین ۱ تا ۱۰ باشد."
+                )
+                return
+
+            answer = users[user_id]["game_number"]
+
+            if guess == answer:
+                del users[user_id]["game_number"]
+                save_data()
+
+                send(
+                    user_id,
+                    f"🎉 درست حدس زدی!\n\n"
+                    f"🎯 جواب: {answer}\n"
+                    "🏆 آفرین!",
+                    FUN_MENU
+                )
+
+            elif guess < answer:
+                send(
+                    user_id,
+                    "❌ اشتباه!\n⬆️ عدد بزرگ‌تره."
+                )
+
+            else:
+                send(
+                    user_id,
+                    "❌ اشتباه!\n⬇️ عدد کوچک‌تره."
+                )
+
+        except ValueError:
+            send(
+                user_id,
+                "🔢 فقط عدد بفرست."
+            )
+
+        return
+
+    # پاسخ سؤال هوش
+    if (
+        "quiz_answer" in users[user_id]
+        and text not in BUTTONS
+    ):
+        if text == users[user_id]["quiz_answer"]:
+            del users[user_id]["quiz_answer"]
+            save_data()
+
+            send(
+                user_id,
+                "🎉 جواب درست بود! 🧠🏆",
+                FUN_MENU
+            )
+        else:
+            send(
+                user_id,
+                "❌ جواب اشتباهه! دوباره امتحان کن."
+            )
+
+        return
+
+    # دکمه‌های چت
+    if text == "🎭 شروع چت ناشناس":
+        find_chat(user_id)
+        return
+
+    if text == "👥 پیدا کردن نفر":
+        find_chat(user_id)
+        return
+
+    if text == "💬 چت فعلی":
+        current_chat(user_id)
+        return
+
+    if text == "🛑 پایان چت":
+        end_chat(user_id)
+        return
+
+    if text == "🚨 گزارش":
+        report_user(user_id)
+        return
+
+    if text == "👤 پروفایل من":
+        show_profile(user_id)
+        return
+
+    if text == "⚙️ تنظیمات":
+        send(
+            user_id,
+            "⚙️ تنظیمات\n\n"
+            "🔒 اطلاعات شخصی خودت را برای افراد ناشناس ارسال نکن.\n\n"
+            "🚨 در صورت رفتار نامناسب گزارش بده.",
+            MAIN_MENU
+        )
+        return
+
+    if text == "❓ راهنما":
+        send(
+            user_id,
+            "❓ راهنما\n\n"
+            "🎭 شروع چت ناشناس → پیدا کردن نفر\n"
+            "💬 چت فعلی → وضعیت چت\n"
+            "🛑 پایان چت → پایان چت\n"
+            "🚨 گزارش → گزارش طرف مقابل\n"
+            "🎲 سرگرمی → بازی‌ها",
+            MAIN_MENU
+        )
+        return
+
+    # پنل ادمین
+    if text == "👥 تعداد کاربران":
+        if user_id == ADMIN_ID:
+            send(
+                user_id,
+                f"👥 تعداد کاربران: {len(users)}",
+                ADMIN_MENU
+            )
+        return
+
+    if text == "🟢 چت‌های فعال":
+        if user_id == ADMIN_ID:
+            active_count = len(active_chats) // 2
+
+            send(
+                user_id,
+                f"🟢 چت‌های فعال: {active_count}",
+                ADMIN_MENU
+            )
+        return
+
+    if text == "⏳ افراد منتظر":
+        if user_id == ADMIN_ID:
+            count = 1 if waiting_user else 0
+
+            send(
+                user_id,
+                f"⏳ افراد منتظر: {count}",
+                ADMIN_MENU
+            )
+        return
+
+    if text == "🚨 گزارش‌ها":
+        if user_id == ADMIN_ID:
+            send(
+                user_id,
+                f"🚨 تعداد گزارش‌ها: {len(reports)}",
+                ADMIN_MENU
+            )
+        return
+
+    if text == "🔙 خروج از پنل":
+        if user_id == ADMIN_ID:
+            send(
+                user_id,
+                "🏠 منوی اصلی",
+                MAIN_MENU
+            )
+        return
+
+    # ارسال پیام فقط به طرف چت
+    if user_id in active_chats:
+        other = active_chats.get(user_id)
+
+        if other is not None:
+            send(
+                other,
+                "👤 طرف مقابل:\n\n" + text
+            )
+
+        return
+
+    send(
+        user_id,
+        "❓ برای ارسال پیام ابتدا یک نفر را پیدا کن.",
+        MAIN_MENU
+    )
+
+
+# تابع سؤال هوش
+def start_quiz(user_id):
+    intelligence_game(user_id)
 
 
 class HealthHandler(BaseHTTPRequestHandler):
+
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
@@ -23,222 +670,95 @@ class HealthHandler(BaseHTTPRequestHandler):
         pass
 
 
-def start_server():
+def start_web_server():
     port = int(os.getenv("PORT", "10000"))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+
+    server = HTTPServer(
+        ("0.0.0.0", port),
+        HealthHandler
+    )
+
     server.serve_forever()
 
 
-def send_message(chat_id, text):
+def get_updates():
+    global offset
+
     try:
-        requests.post(
-            f"{BASE_URL}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": text
+        response = requests.get(
+            URL + "getUpdates",
+            params={
+                "offset": offset,
+                "timeout": 30
             },
-            timeout=30
-        )
-    except Exception as e:
-        print("Send error:", e)
-
-
-def get_updates(offset=None):
-    try:
-        data = {"timeout": 30}
-
-        if offset is not None:
-            data["offset"] = offset
-
-        response = requests.post(
-            f"{BASE_URL}/getUpdates",
-            json=data,
             timeout=40
         )
 
         return response.json()
 
     except Exception as e:
-        print("Get updates error:", e)
-        return {"ok": False, "result": []}
+        print("GET UPDATES ERROR:", e)
+        return {}
 
 
-def find_partner(user_id):
-    global waiting_user
+load_data()
 
-    if waiting_user == user_id:
-        return None
+print("🤖 بات با موفقیت شروع شد...")
 
-    if waiting_user is not None:
-        partner = waiting_user
-        waiting_user = None
-
-        partners[user_id] = partner
-        partners[partner] = user_id
-
-        return partner
-
-    waiting_user = user_id
-    return None
+threading.Thread(
+    target=start_web_server,
+    daemon=True
+).start()
 
 
-def remove_from_chat(user_id):
-    global waiting_user
+while True:
 
-    if waiting_user == user_id:
-        waiting_user = None
+    try:
+        data = get_updates()
 
-    partner = partners.pop(user_id, None)
+        if not data.get("ok"):
+            time.sleep(2)
+            continue
 
-    if partner is not None:
-        partners.pop(partner, None)
-        return partner
+        updates = data.get("result", [])
 
-    return None
+        for update in updates:
 
+            offset = update["update_id"] + 1
 
-def handle_message(message):
+            message = update.get("message")
 
-    chat = message.get("chat", {})
-    user_id = chat.get("id")
-
-    if not user_id:
-        return
-
-    text = message.get("text", "").strip()
-
-    if text == "/start":
-
-        send_message(
-            user_id,
-            "سلام 👋\n"
-            "به چت ناشناس خوش آمدی.\n\n"
-            "برای پیدا کردن یک نفر ناشناس:\n"
-            "/find\n\n"
-            "برای پایان گفتگو:\n"
-            "/stop"
-        )
-
-        return
-
-    if text == "/find":
-
-        if user_id in partners:
-
-            send_message(
-                user_id,
-                "تو الان در یک گفتگوی ناشناس هستی.\n"
-                "برای پایان گفتگو /stop را بفرست."
-            )
-
-            return
-
-        partner = find_partner(user_id)
-
-        if partner is None:
-
-            send_message(
-                user_id,
-                "⏳ در حال پیدا کردن یک نفر برای چت هستم..."
-            )
-
-        else:
-
-            send_message(
-                user_id,
-                "✅ یک نفر پیدا شد!\n"
-                "پیامت به صورت ناشناس ارسال می‌شود."
-            )
-
-            send_message(
-                partner,
-                "✅ یک نفر پیدا شد!\n"
-                "پیامت به صورت ناشناس ارسال می‌شود."
-            )
-
-        return
-
-    if text == "/stop":
-
-        partner = remove_from_chat(user_id)
-
-        if partner is not None:
-
-            send_message(
-                user_id,
-                "🛑 گفتگو تمام شد."
-            )
-
-            send_message(
-                partner,
-                "🛑 طرف مقابل گفتگو را تمام کرد."
-            )
-
-        else:
-
-            send_message(
-                user_id,
-                "شما در حال حاضر در گفتگویی نیستید."
-            )
-
-        return
-
-    if user_id in partners:
-
-        partner = partners[user_id]
-
-        send_message(
-            partner,
-            "💬 پیام ناشناس:\n\n" + text
-        )
-
-        return
-
-    send_message(
-        user_id,
-        "ابتدا /find را بفرست تا یک نفر برای چت پیدا شود."
-    )
-
-
-def main():
-
-    print("Bale anonymous chat bot started.")
-
-    offset = None
-
-    while True:
-
-        try:
-
-            data = get_updates(offset)
-
-            if not data.get("ok"):
-
-                time.sleep(3)
+            if not message:
                 continue
 
-            updates = data.get("result", [])
+            chat = message.get("chat")
 
-            for update in updates:
+            if not chat:
+                continue
 
-                offset = update.get("update_id", 0) + 1
+            user_id = chat.get("id")
 
-                message = update.get("message")
+            text = message.get("text")
 
-                if message:
-                    handle_message(message)
+            if not text:
+                continue
 
-        except Exception as e:
+            print(
+                "MESSAGE:",
+                user_id,
+                text
+            )
 
-            print("Main error:", e)
-            time.sleep(3)
+            process_message(
+                user_id,
+                text
+            )
 
+    except Exception as e:
 
-if __name__ == "__main__":
+        print(
+            "MAIN ERROR:",
+            e
+        )
 
-    threading.Thread(
-        target=start_server,
-        daemon=True
-    ).start()
-
-    main()
+        time.sleep(3)
